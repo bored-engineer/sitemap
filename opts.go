@@ -5,18 +5,22 @@ import (
 	"net/http"
 )
 
-// Callback processes each <urlset> as they are identified
+// ProcessFunc processes each <urlset> as they are identified
 type ProcessFunc func(
 	ctx context.Context,
 	sitemap *Sitemap,
 	urls []URL,
 ) error
 
+// FilterFunc reduces the list of sitemaps to fetch
+type FilterFunc func([]Sitemap) []Sitemap
+
 // options is an internal
 type options struct {
 	client      *http.Client
 	parallelism int
 	processor   ProcessFunc
+	filter      FilterFunc
 }
 
 // Option changes the behavior of the Fetch function
@@ -40,5 +44,12 @@ func WithParallelism(limit int) Option {
 func WithProcessor(f ProcessFunc) Option {
 	return func(opts *options) {
 		opts.processor = f
+	}
+}
+
+// WithFilter provides a custom function for filtering sitemaps
+func WithFilter(f FilterFunc) Option {
+	return func(opts *options) {
+		opts.filter = f
 	}
 }
