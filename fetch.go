@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	stdurl "net/url"
+	"net/url"
 	"runtime"
 	"sync"
 
@@ -92,7 +92,7 @@ func Fetch(ctx context.Context, sitemap string, opts ...Option) (urls []URL, err
 		return nil, fmt.Errorf("expected <urlset> or <sitemapindex>, got <%s>", resp.XMLName.Local)
 	}
 	// Must be a <sitemapindex>, parse the provided root URL to extract the hostname for later matching
-	rootURL, err := stdurl.Parse(sitemap)
+	rootURL, err := url.Parse(sitemap)
 	if err != nil {
 		return nil, fmt.Errorf("url.Parse failed: %w", err)
 	}
@@ -107,7 +107,7 @@ func Fetch(ctx context.Context, sitemap string, opts ...Option) (urls []URL, err
 		sitemap := sitemap
 		g.Go(func() error {
 			// Check that the origin matches before fetching
-			if sitemapURL, err := stdurl.Parse(sitemap.Location); err != nil {
+			if sitemapURL, err := url.Parse(sitemap.Location); err != nil {
 				return fmt.Errorf("url.Parse failed: %w", err)
 			} else if sitemapURL.Host != rootURL.Host || sitemapURL.Scheme != rootURL.Scheme {
 				return fmt.Errorf("refusing to fetch %q as it is a different origin", sitemap.Location)
