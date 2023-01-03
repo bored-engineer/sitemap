@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestFetch(t *testing.T) {
+func TestFetch_URLSet(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "sitemap") {
 			w.WriteHeader(http.StatusOK)
@@ -23,15 +23,15 @@ func TestFetch(t *testing.T) {
 	}))
 	defer ts.Close()
 	ctx := context.TODO()
-	result, _, err := Fetch(ctx, nil, ts.URL+"/sitemap")
+	urls, err := Fetch(ctx, ts.URL+"/sitemap")
 	assert.NoError(t, err)
-	assert.IsType(t, URLSet{}, result)
-	result, _, err = Fetch(ctx, nil, ts.URL+"/404")
+	assert.Len(t, urls, 2)
+	urls, err = Fetch(ctx, ts.URL+"/404")
 	assert.Error(t, err)
-	assert.Nil(t, result)
+	assert.Nil(t, urls)
 }
 
-func TestFetchParallel(t *testing.T) {
+func TestFetch_SitemapIndex(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		baseURL := "http://" + r.Host + "/"
@@ -43,13 +43,10 @@ func TestFetchParallel(t *testing.T) {
 	}))
 	defer ts.Close()
 	ctx := context.TODO()
-	result, index, err := FetchParallel(ctx, nil, ts.URL+"/urlset", -1)
+	urls, err := Fetch(ctx, ts.URL+"/urlset")
 	assert.NoError(t, err)
-	assert.Nil(t, index)
-	assert.Len(t, result, 1)
-	result, index, err = FetchParallel(ctx, nil, ts.URL+"/index", 2)
+	assert.Len(t, urls, 2)
+	urls, err = Fetch(ctx, ts.URL+"/index")
 	assert.NoError(t, err)
-	assert.NotNil(t, index)
-	assert.Len(t, result, 2)
-	assert.Len(t, index.Sitemaps, 2)
+	assert.Len(t, urls, 4)
 }

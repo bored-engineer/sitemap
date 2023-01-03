@@ -2,88 +2,131 @@ package sitemap
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
+	stdurl "net/url"
+	"runtime"
+	"sync"
 
 	"github.com/hashicorp/go-cleanhttp"
 	"golang.org/x/sync/errgroup"
 )
 
-// Fetch performs a single HTTP GET request for the provided URL, parsing the result as a Sitemap or URLSet struct
-func Fetch(ctx context.Context, client *http.Client, url string) (any, *http.Response, error) {
+// response captures either a <urlset> or a <sitemapindex>
+type response struct {
+	XMLName xml.Name
+	// Container for the data needed to describe a sitemap.
+	Sitemaps []Sitemap `xml:"sitemap"`
+	// Container for the data needed to describe a document to crawl.
+	URLs []URL `xml:"url"`
+}
+
+// fetchResponse performs a single HTTP GET request for the provided URL, parsing the result as a Response struct
+func fetchResponse(ctx context.Context, client *http.Client, sitemap string) (*response, error) {
 	// If no client was provided, use a reasonable default
 	if client == nil {
 		client = cleanhttp.DefaultClient()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sitemap, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("http.NewRequestWithContext failed: %w", err)
+		return nil, fmt.Errorf("http.NewRequestWithContext failed: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, resp, fmt.Errorf("(*http.Client).Do failed: %w", err)
+		return nil, fmt.Errorf("(*http.Client).Do failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, resp, fmt.Errorf("expected 200, got %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("expected 200, got %d: %s", resp.StatusCode, string(body))
 	}
-	result, err := Parse(resp.Body)
-	if err != nil {
-		return nil, resp, fmt.Errorf("Parse failed: %w", err)
+	d := xml.NewDecoder(resp.Body)
+	var elem response
+	if err := d.Decode(&elem); err != nil {
+		return nil, fmt.Errorf("xml.Unmarshal failed: %w", err)
 	}
-	return result, resp, nil
+	return &elem, nil
 }
 
-// FetchParallel fetches the provided URL, if it is already a <urlset> it is returned a single element slice and the returned <sitemapindex> is nil
-// If the response was a <sitemap>, each child sitemap is fetched at the provided parallelism and returned in the matching order as the returned <sitemapindex>
-func FetchParallel(ctx context.Context, client *http.Client, url string, parallelism int) ([]URLSet, *SitemapIndex, error) {
-	// If no client was provided, use a reasonable default
-	if client == nil {
-		client = cleanhttp.DefaultClient()
+// Fetch retrieves the URLs in a given sitemap using reasonable defaults
+func Fetch(ctx context.Context, sitemap string, opts ...Option) (urls []URL, err error) {
+	// Apply the provided functional options
+	var o options
+	for _, f := range opts {
+		f(&o)
 	}
-	// Fetch the root sitemap
-	result, _, err := Fetch(ctx, client, url)
+	// Set reasonable defaults if not specified
+	if o.client == nil {
+		o.client = cleanhttp.DefaultClient()
+	}
+	if o.parallelism == 0 {
+		o.parallelism = runtime.GOMAXPROCS(0)
+	}
+	if o.processor == nil {
+		var mu sync.Mutex
+		o.processor = func(_ context.Context, _ *Sitemap, chunk []URL) error {
+			mu.Lock()
+			urls = append(urls, chunk...)
+			mu.Unlock()
+			return nil
+		}
+	}
+	// Fetch the root response object first
+	resp, err := fetchResponse(ctx, o.client, sitemap)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Fetch for %q failed: %w", url, err)
+		return nil, fmt.Errorf("failed to fetch %q: %w", sitemap, err)
 	}
-	// If result was a <urlset>, we're done, bail early
-	if urlset, ok := result.(URLSet); ok {
-		return []URLSet{urlset}, nil, nil
+	switch resp.XMLName.Local {
+	case "urlset":
+		// If it was a <urlset>, we can invoke the processor and exit early
+		if err := o.processor(ctx, nil, resp.URLs); err != nil {
+			return nil, err
+		}
+		return
+	case "sitemapindex":
+		// continue
+	default:
+		// unexpected root
+		return nil, fmt.Errorf("expected <urlset> or <sitemapindex>, got <%s>", resp.XMLName.Local)
 	}
-	// If it was anything other than <sitemapindex>, something has gone wrong
-	index, ok := result.(SitemapIndex)
-	if !ok {
-		return nil, nil, fmt.Errorf("expected SitemapIndex, got %T for %q", result, url)
+	// Must be a <sitemapindex>, parse the provided root URL to extract the hostname for later matching
+	rootURL, err := stdurl.Parse(sitemap)
+	if err != nil {
+		return nil, fmt.Errorf("url.Parse failed: %w", err)
 	}
-	// pre-allocate URLs slice so we can (safely) write to it in parallel
-	urls := make([]URLSet, len(index.Sitemaps))
 	// Use an errgroup to bail if an error occurs, and to limit parallelism
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(parallelism)
-	for idx, sitemap := range index.Sitemaps {
+	g.SetLimit(o.parallelism)
+	for _, sitemap := range resp.Sitemaps {
 		if gCtx.Err() != nil {
 			break
 		}
 		// don't use the loop variables within a go-routine
-		idx, url := idx, sitemap.Location
+		sitemap := sitemap
 		g.Go(func() error {
-			result, _, err := Fetch(gCtx, client, url)
+			// Check that the origin matches before fetching
+			if sitemapURL, err := stdurl.Parse(sitemap.Location); err != nil {
+				return fmt.Errorf("url.Parse failed: %w", err)
+			} else if sitemapURL.Host != rootURL.Host || sitemapURL.Scheme != rootURL.Scheme {
+				return fmt.Errorf("refusing to fetch %q as it is a different origin", sitemap.Location)
+			}
+			resp, err := fetchResponse(gCtx, o.client, sitemap.Location)
 			if err != nil {
-				return fmt.Errorf("Fetch for %q failed: %w", url, err)
+				return fmt.Errorf("failed to fetch %q: %w", sitemap.Location, err)
 			}
-			// If it was anything other than <urlset>, something has gone wrong
-			urlset, ok := result.(URLSet)
-			if !ok {
-				return fmt.Errorf("expected URLSet, got %T for %q", result, url)
+			if resp.XMLName.Local != "urlset" {
+				return fmt.Errorf("expected <urlset>, got <%s>", resp.XMLName.Local)
 			}
-			urls[idx] = urlset
+			if err := o.processor(ctx, &sitemap, resp.URLs); err != nil {
+				return err
+			}
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return urls, &index, nil
+	return
 }
