@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -96,6 +97,11 @@ func Fetch(ctx context.Context, sitemap string, opts ...Option) (urls []URL, err
 	if err != nil {
 		return nil, fmt.Errorf("url.Parse failed: %w", err)
 	}
+	// Randomize the order of the sitemaps so we're fetching in a non sequential order
+	// TODO: This is deterministic unless the caller has seeded randomize
+	rand.Shuffle(len(resp.Sitemaps), func(i, j int) {
+		resp.Sitemaps[i], resp.Sitemaps[j] = resp.Sitemaps[j], resp.Sitemaps[i]
+	})
 	// Use an errgroup to bail if an error occurs, and to limit parallelism
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(o.parallelism)
